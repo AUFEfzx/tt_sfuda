@@ -9,6 +9,8 @@ from dataset import Dataset
 from metrics import iou_score
 from utils import AverageMeter
 from collections import OrderedDict
+import numpy as np
+from PIL import Image
 
 from albumentations import RandomRotate90,Resize
 from albumentations.augmentations import transforms
@@ -102,6 +104,13 @@ def ent_select(aug_all_ent):
             aug_req_ent.append(aug_all_ent[i])
     return aug_req_ent
 
+
+def my_save(ps_output, pic_name):
+    img_tensor = ps_output.cpu()[0].squeeze(0)
+    img_np = img_tensor.numpy()
+    img_pil = Image.fromarray((img_np*255).astype(np.uint8))
+    img_pil.save(pic_name)
+
 def uncert_voting(aug_output):
     aug_all_prob = []
     aug_all_ent = []
@@ -114,6 +123,7 @@ def uncert_voting(aug_output):
     no_aug_pseudo_label = no_aug_prob_nor.clone()
     no_aug_pseudo_label[no_aug_pseudo_label>=0.5]=1
     no_aug_pseudo_label[no_aug_pseudo_label<0.5]=0
+    my_save(no_aug_pseudo_label,"no_aug_pseudo_label.png")
 
     no_aug_ent = sigmoid_entropy(torch.sigmoid(aug_output[0]))
     no_aug_ent[torch.isnan(no_aug_ent)] = 0
@@ -144,6 +154,7 @@ def uncert_voting(aug_output):
 
     pseudo_uncert = unct_no_aug_prob.int()&weighted_ent_thresh.int()
     pseudo_label = no_aug_pseudo_label.int()|pseudo_uncert.int()
+    # pseudo_label = pseudo_label.int()&unct_no_aug_prob.int()
     return pseudo_label.unsqueeze(0).float()
 
 def sfuda_target(config, train_loader, pseduo_model, msrc_model, criterion, optimizer):
@@ -153,11 +164,48 @@ def sfuda_target(config, train_loader, pseduo_model, msrc_model, criterion, opti
     msrc_model.train()
     pbar = tqdm(total=len(train_loader))
 
+    # from PIL import Image
     for input, target, path in train_loader:
+        
+        #fze test
+        # import pdb
+        # pdb.set_trace()
+        # img_tensor = input.squeeze(0).permute(1, 2, 0)
+        # img_np = img_tensor.numpy()
+        # img_np = img_np[:,:,::-1]
+        # img_pil = Image.fromarray((img_np*255).astype(np.uint8)) 
+        # img_pil.save(f'img_origin.png')
+
         aug_input = build_pseduo_augmentation(input.squeeze(0))
         with torch.no_grad():
             aug_output = pseduo_model(aug_input.cuda())
             ps_output = uncert_voting(aug_output.detach())
+            
+            # #保存augmentation处理后的图片
+            # for i in range((aug_input.cpu()).size(0)):
+            #     img_tensor = aug_input[i].squeeze(0).permute(1, 2, 0)
+            #     img_np = img_tensor.numpy()
+            #     img_np = img_np[:,:,::-1]
+            #     img_pil = Image.fromarray((img_np*255).astype(np.uint8))
+            #     img_pil.save(f'img_aug_{i}.png')
+                
+            # #保存pseduo_model处理后的图片
+            # tensor = aug_output.cpu()
+            # for i in range(tensor.size(0)):
+            #     img_tensor = tensor[i].squeeze(0)
+            #     img_np = img_tensor.numpy()
+            #     img_pil = Image.fromarray((img_np*255).astype(np.uint8))
+            #     img_pil.save(f'img_psedo_{i}.png')
+
+            #     # img_tensor = (img_tensor * 255).type(torch.uint8)
+            #     # img_np = img_tensor.numpy()
+            #     # img_pil = Image.fromarray(img_np.squeeze())  # 去掉单通道维度
+            #     # img_pil.save(f'img_psedo_{i}.png')
+            # #保存vote处理后的图片
+            # img_tensor = ps_output.cpu()[0][0].squeeze(0)
+            # img_np = img_tensor.numpy()
+            # img_pil = Image.fromarray((img_np*255).astype(np.uint8))
+            # img_pil.save(f'img_voted.png')
 
         optimizer.zero_grad()
         output = msrc_model(aug_input.cuda())
@@ -320,6 +368,8 @@ def main():
     msrc_model = archs.__dict__[config['arch']](config['num_classes'],
                                            config['input_channels'],
                                            config['deep_supervision'])
+    # import pdb
+    # pdb.set_trace()
 
     msrc_model.load_state_dict(torch.load('models/%s/model.pth'%config['name']))
     msrc_model.cuda()
@@ -378,7 +428,61 @@ def main():
     print("Performing adapted target model evaluation...!!!")
     val_log = validate(val_loader, tgt_model, criterion)
     print('Adapted target model dice: %.4f' % (val_log['dice']))
+    myfoward(tgt_model, val_loader)
 
+#pic_path "/data1/fuzhenxin/SR/tt-sfuda/TT_SFUDA_2D/inputs/chase/test/images/Image_11R.png"
+    
+def myfoward(tgt_model, val_loader):
+    tgt_model.eval()
+
+    with torch.no_grad():
+        pbar = tqdm(total=len(val_loader))
+        for input, target, meta in val_loader:
+            input = input.cuda()
+            target = target.cuda()
+
+            output = tgt_model(input)
+            tensor = torch.sigmoid(output).detach().clone().cpu()
+            # tensor = output.cpu()
+
+            #save output
+            # import pdb
+            # pdb.set_trace()
+            
+            img_tensor = tensor[0].squeeze(0)
+            img_np = img_tensor.detach().numpy()
+            # img_np = img_np > 0.5
+            img_pil = Image.fromarray((img_np*255).astype(np.uint8))
+            # pic_name=meta['img_id'][0]
+            pic_name=meta['img_id'][0]
+            img_pil.save(f'./fzx_output/{pic_name}_foward.png')
+            
+            pbar.update(1)
+        pbar.close
+
+
+    # img = Image.open(pic_path).convert('RGB').resize(size=(512,512))
+    # image_array = np.array(img).astype(np.float32)
+    # # 将 RGB 转换为 BGR
+    # bgr_image_array = image_array[:, :, ::-1]  # 反转颜色通道
+
+    # img_np = np.array(bgr_image_array)
+    # tensor_img = torch.from_numpy(img_np).permute(2, 0, 1).float()/255.0
+    # img_tensor = tensor_img.unsqueeze(0)  # 从HWC转换为CHW，然后添加批次维度
+
+    # output=model(img_tensor.cuda())
+    # ps_output = torch.sigmoid(output).detach().clone()
+    # # ps_output[ps_output>=0.5]=1
+    # # ps_output[ps_output<0.5]=0
+    # tensor = ps_output.cpu()
+    # # import pdb 
+    # # pdb.set_trace()
+    # img_tensor = tensor[0].squeeze(0)
+    # img_np = img_tensor.detach().numpy()
+    # img_pil = Image.fromarray((img_np*255).astype(np.uint8))
+    # img_pil.save('foward.png')
 
 if __name__ == '__main__':
     main()
+
+    # myfoward(1, "/data1/fuzhenxin/SR/tt-sfuda/dataset/rite/test/images/06_test.png")
